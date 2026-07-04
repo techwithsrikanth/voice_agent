@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Recorder, playBase64Wav, speakLocally } from './audio.js';
+import { Recorder, playBase64Wav, speakLocally, blobToBase64 } from './audio.js';
 
 const LANG_OPTIONS = [
   { code: 'auto', label: 'Auto-detect', flag: '🌐' },
@@ -10,7 +10,6 @@ const LANG_OPTIONS = [
 
 export default function App() {
   const [health, setHealth] = useState(null);
-  const [sessionId, setSessionId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [langPref, setLangPref] = useState('auto');
   const [persona, setPersona] = useState('');
@@ -37,18 +36,6 @@ export default function App() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, status]);
-
-  async function ensureSession() {
-    if (sessionId) return sessionId;
-    const res = await fetch('/api/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ persona, langPref }),
-    });
-    const { session } = await res.json();
-    setSessionId(session.id);
-    return session.id;
-  }
 
   async function toggleRecord() {
     setError(null);
@@ -83,15 +70,17 @@ export default function App() {
   async function sendTurn({ audio, text }) {
     setStatus('thinking');
     try {
-      const sid = await ensureSession();
-      const form = new FormData();
-      form.append('sessionId', sid);
-      form.append('langPref', langPref);
-      form.append('persona', persona);
-      if (audio) form.append('audio', audio, 'turn.wav');
-      if (text) form.append('text', text);
+      // Stateless API: the client carries the running conversation history.
+      const history = messages.map((m) => ({ role: m.role, text: m.text }));
+      const body = { langPref, persona, history };
+      if (audio) body.audioBase64 = await blobToBase64(audio);
+      if (text) body.text = text;
 
-      const res = await fetch('/api/chat', { method: 'POST', body: form });
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Request failed');
 
@@ -172,7 +161,6 @@ export default function App() {
         <button
           className="ghost small"
           onClick={() => {
-            setSessionId(null);
             setMessages([]);
             setError(null);
           }}

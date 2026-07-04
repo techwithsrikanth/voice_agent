@@ -115,6 +115,16 @@ function encodeWav(samples, sampleRate) {
   return new Blob([view], { type: 'audio/wav' });
 }
 
+// Blob -> base64 string (no data: prefix), for sending audio as JSON.
+export function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
 // Play a base64 WAV returned by the server.
 export function playBase64Wav(b64) {
   return new Promise((resolve) => {

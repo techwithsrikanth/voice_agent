@@ -1,0 +1,11 @@
+{
+  "name": "vaani-voice-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Vaani - multilingual (Tamil/Hindi/English) voice agent. Vercel-native: static React client + serverless API.",
+  "scripts": {
+    "dev": "npm run dev --prefix server",
+    "build": "npm install --prefix client && npm run build --prefix client"
+  }
+}

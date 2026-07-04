@@ -1,6 +1,7 @@
 // Sarvam AI client for the three pipeline stages: STT -> LLM -> TTS.
-// Falls back to a deterministic MOCK engine when SARVAM_API_KEY is not set,
-// so the whole voice loop can be demoed with zero cost / no account.
+// Stateless + framework-agnostic: used by both the Vercel serverless functions
+// (api/chat.js) and the local Express dev server (server/index.js).
+// Falls back to a deterministic MOCK engine when SARVAM_API_KEY is not set.
 
 const API = 'https://api.sarvam.ai';
 const KEY = process.env.SARVAM_API_KEY?.trim();
@@ -69,21 +70,42 @@ export async function reply({ persona, history, userText, language }) {
 
   const messages = [
     { role: 'system', content: system },
-    ...history.slice(-10).map((t) => ({
+    ...(history || []).slice(-10).map((t) => ({
       role: t.role === 'agent' ? 'assistant' : 'user',
       content: t.text,
     })),
     { role: 'user', content: userText },
   ];
 
-  const res = await fetch(`${API}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { ...headers(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: LLM_MODEL, messages, temperature: 0.5 }),
-  });
-  if (!res.ok) throw new Error(`LLM ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return (data.choices?.[0]?.message?.content || '').trim();
+  // sarvam-30b is a reasoning model. We turn thinking off for fast, direct voice
+  // replies. NOTE: do not set max_tokens — a residual reasoning trace is emitted
+  // even with thinking off, and any cap can truncate it mid-trace, yielding empty
+  // content. Even so, ~1 in 5 calls returns empty content, and for a given input
+  // it can repeat, so we retry AND raise the temperature to break determinism.
+  const temps = [0.5, 0.9, 1.1, 0.7];
+  let lastErr;
+  for (const temperature of temps) {
+    const res = await fetch(`${API}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: LLM_MODEL,
+        messages,
+        temperature,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+    });
+    if (!res.ok) {
+      lastErr = new Error(`LLM ${res.status}: ${await res.text()}`);
+      continue;
+    }
+    const data = await res.json();
+    const content = (data.choices?.[0]?.message?.content || '').trim();
+    if (content) return content;
+  }
+  if (lastErr) throw lastErr;
+  return ''; // all attempts empty -> runTurn falls back to a polite reprompt
+
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +130,46 @@ export async function synthesize(text, language) {
   if (!res.ok) throw new Error(`TTS ${res.status}: ${await res.text()}`);
   const data = await res.json();
   return data.audios?.[0] || null;
+}
+
+// ---------------------------------------------------------------------------
+// The one place the whole turn is orchestrated. Stateless: the caller passes
+// the running `history`. Returns everything the client needs to render + play.
+// ---------------------------------------------------------------------------
+export async function runTurn({ audioBase64, text, langPref = 'auto', persona, history = [] }) {
+  let transcript, language;
+  if (text) {
+    transcript = text.trim();
+    language = langPref !== 'auto' ? langPref : 'en-IN';
+  } else {
+    const buffer = Buffer.from(audioBase64, 'base64');
+    ({ transcript, language } = await transcribe(buffer, langPref));
+  }
+  if (!transcript) {
+    const err = new Error('Could not hear anything. Please try again.');
+    err.status = 422;
+    throw err;
+  }
+
+  let replyText = await reply({
+    persona: persona || defaultPersona(),
+    history,
+    userText: transcript,
+    language,
+  });
+  // Guard: never send empty text to TTS (it 400s). Fall back to a polite prompt
+  // in the caller's language.
+  if (!replyText) replyText = EMPTY_FALLBACK[language] || EMPTY_FALLBACK['en-IN'];
+  const audio = await synthesize(replyText, language);
+
+  return {
+    transcript,
+    language,
+    languageName: LANGS[language]?.name || language,
+    reply: replyText,
+    audio, // base64 WAV or null
+    mock: MOCK,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -152,3 +214,9 @@ function mockTranscribe(langHint) {
 function mockReply(_userText, language) {
   return (MOCK_LINES[language] || MOCK_LINES['en-IN']).reply;
 }
+
+const EMPTY_FALLBACK = {
+  'ta-IN': 'மன்னிக்கவும், அதை மீண்டும் சொல்ல முடியுமா?',
+  'hi-IN': 'माफ़ कीजिए, क्या आप इसे दोबारा बता सकते हैं?',
+  'en-IN': 'Sorry, could you please say that again?',
+};
